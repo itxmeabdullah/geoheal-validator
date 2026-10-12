@@ -1,0 +1,31 @@
+{
+  "name": "geoheal-validator",
+  "type": "module",
+  "version": "0.0.1",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "cross-env NAPI_RS_FORCE_WASI=1 astro dev",
+    "build": "cross-env NAPI_RS_FORCE_WASI=1 astro build",
+    "preview": "cross-env NAPI_RS_FORCE_WASI=1 astro preview",
+    "astro": "cross-env NAPI_RS_FORCE_WASI=1 astro"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "^14.3.4",
+    "@astrojs/react": "^7.0.1",
+    "@google/genai": "^2.28.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@turf/turf": "^7.4.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "astro": "^7.3.8",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3"
+  },
+  "devDependencies": {
+    "@astrojs/compiler-binding-wasm32-wasi": "^0.4.1",
+    "cross-env": "^10.1.0"
+  }
+}

@@ -1,0 +1,288 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { PreflightChecker } from '../components/PreflightChecker';
+
+export async function getStaticPaths() {
+  const commodities = [
+    {
+      slug: 'cattle',
+      name: 'Cattle',
+      titleName: 'Cattle',
+      icon: '🐄',
+      hsCodes: '0102 (live bovine), 0201/0202 (beef), 4101 (raw hides/skins)',
+      typicalIssues: 'Extensive ranch perimeters, overlapping grazing parcels, multi-ring pasture polygons.',
+      eudrContext:
+        'Under EUDR, cattle operators must submit exact polygon boundaries for all grazing plots and establishments where livestock were raised. Single points are strictly invalid for ranches over 0.5 ha.',
+      description:
+        'Fix Cattle EUDR GeoJSON Polygons for TRACES NT. Automatically close pasture rings, eliminate self-intersections, verify WGS84 coordinates, and enforce >0.5 ha ranch polygon rules.',
+    },
+    {
+      slug: 'cocoa',
+      name: 'Cocoa',
+      titleName: 'Cocoa',
+      icon: '🍫',
+      hsCodes: '1801 (beans), 1802 (shells), 1803 (paste), 1804 (butter), 1805 (powder), 1806 (chocolate)',
+      typicalIssues: 'Complex smallholder cooperative mosaics, GPS drift in dense canopy, unclosed perimeter loops.',
+      eudrContext:
+        'Cocoa supply chains across West Africa, Latin America, and Southeast Asia require farm-level polygon geolocations in TRACES NT for all plots >= 0.5 ha to demonstrate zero deforestation.',
+      description:
+        'Fix Cocoa EUDR GeoJSON Polygons for TRACES NT. Repair unclosed rings, resolve self-intersecting canopy boundaries with Turf.js, and guarantee TRACES NT polygon compliance.',
+    },
+    {
+      slug: 'coffee',
+      name: 'Coffee',
+      titleName: 'Coffee',
+      icon: '☕',
+      hsCodes: '0901 (coffee, roasted, decaffeinated, husks, and skins)',
+      typicalIssues: 'Steep terrain GPS multipath errors, reversed latitude/longitude coordinates, multi-polygon estates.',
+      eudrContext:
+        'Coffee producers in Brazil, Vietnam, Colombia, Ethiopia, and beyond must supply WGS84 GeoJSON polygons for each production parcel exceeding 0.5 hectares before importing into the EU.',
+      description:
+        'Fix Coffee EUDR GeoJSON Polygons for TRACES NT. Validate coffee farm plot polygons, eliminate self-intersections with zero-buffer repairs, and verify WGS84 coordinate integrity.',
+    },
+    {
+      slug: 'palm-oil',
+      name: 'Palm Oil',
+      titleName: 'Palm Oil',
+      icon: '🌴',
+      hsCodes: '1511 (palm oil), 1207 10 (palm nuts/kernels), 2306 60 (oilcake)',
+      typicalIssues: 'Enormous estate boundary self-intersections, coordinate precision loss, buffer zone confusion.',
+      eudrContext:
+        'Oil palm concessions and scheme smallholders must upload validated GeoJSON polygon files to TRACES NT. Zero overlap and strictly closed linear rings are enforced during due diligence statement filing.',
+      description:
+        'Fix Palm Oil EUDR GeoJSON Polygons for TRACES NT. Clean oil palm plantation coordinates, resolve self-intersections with Turf.js, and enforce TRACES NT polygon criteria.',
+    },
+    {
+      slug: 'rubber',
+      name: 'Rubber',
+      titleName: 'Rubber',
+      icon: '🪵',
+      hsCodes: '4001 (natural rubber), 4005, 4006, 4007, 4008, 4010, 4011 (tires), 4012',
+      typicalIssues: 'Smallholder intercropped parcel gaps, knotting coordinates, unclosed boundary segments.',
+      eudrContext:
+        'Natural rubber smallholders and agroforestry plantations must submit digital plot perimeters to TRACES NT to verify rubber tapped does not stem from deforested land post-December 31, 2020.',
+      description:
+        'Fix Rubber EUDR GeoJSON Polygons for TRACES NT. Detect and auto-close unclosed rubber plot rings, repair self-intersections, and validate WGS84 geometry for TRACES NT.',
+    },
+    {
+      slug: 'soy',
+      name: 'Soy',
+      titleName: 'Soy',
+      icon: '🌱',
+      hsCodes: '1201 (soya beans), 1208 10 (flour/meal), 1507 (soya oil), 2304 (oilcake)',
+      typicalIssues: 'Large agricultural field slivers, coordinate inversion (Lat/Lon swapped), winding order defects.',
+      eudrContext:
+        'Soybean operators in South America and the US must provide polygon boundaries for all cultivation plots > 0.5 ha. Inverted coordinates and coordinate overflows are immediate grounds for TRACES NT rejection.',
+      description:
+        'Fix Soy EUDR GeoJSON Polygons for TRACES NT. Fix soybean field polygons, invert swapped coordinates, resolve self-intersecting boundaries, and calculate compliant hectare areas.',
+    },
+    {
+      slug: 'timber',
+      name: 'Timber',
+      titleName: 'Timber',
+      icon: '🌲',
+      hsCodes: 'Chapter 44 (wood & articles of wood), Chapter 47/48 (pulp & paper), 9401, 9403 (wooden furniture)',
+      typicalIssues: 'MultiPolygon forest harvest cuts, complex donut holes (interior exclusion rings), coordinate truncation.',
+      eudrContext:
+        'Forestry concessionaires and timber harvesters must provide high-precision polygon boundaries for timber extraction coupes in TRACES NT, ensuring no logging took place in protected forests.',
+      description:
+        'Fix Timber EUDR GeoJSON Polygons for TRACES NT. Auto-repair forestry concession polygons, close harvest coupe rings, and eliminate self-intersections with Turf.js.',
+    },
+  ];
+
+  return commodities.map((item) => ({
+    params: { commodity: item.slug },
+    props: {
+      item,
+      allCommodities: commodities.map((c) => ({ slug: c.slug, name: c.name, icon: c.icon })),
+    },
+  }));
+}
+
+interface Props {
+  item: {
+    slug: string;
+    name: string;
+    titleName: string;
+    icon: string;
+    hsCodes: string;
+    typicalIssues: string;
+    eudrContext: string;
+    description: string;
+  };
+  allCommodities: Array<{
+    slug: string;
+    name: string;
+    icon: string;
+  }>;
+}
+
+const { item, allCommodities } = Astro.props;
+
+const pageTitle = `Fix ${item.titleName} EUDR GeoJSON Polygons for TRACES NT | GeoHeal`;
+const metaDescription = `Fix ${item.titleName} EUDR GeoJSON Polygons for TRACES NT. Free pre-flight validator to auto-close rings, eliminate self-intersections with Turf.js, verify WGS84 coordinates, and enforce TRACES NT polygon thresholds.`;
+---
+
+<Layout title={pageTitle} description={metaDescription}>
+  <div class="space-y-10">
+    <!-- Breadcrumb -->
+    <nav class="flex items-center gap-2 text-xs text-slate-400 font-mono" aria-label="Breadcrumb">
+      <a href="/" class="hover:text-emerald-400 transition-colors">Home</a>
+      <span>/</span>
+      <span class="text-slate-500">Commodity Fixers</span>
+      <span>/</span>
+      <span class="text-emerald-400 font-medium">{item.name} EUDR Fix</span>
+    </nav>
+
+    <!-- Programmatic SEO Header & Hero Section -->
+    <div class="relative overflow-hidden rounded-2xl border border-slate-800 bg-gradient-to-b from-slate-900/90 to-slate-900/40 p-8 sm:p-10 shadow-2xl">
+      <div class="absolute -top-32 -right-32 w-96 h-96 bg-emerald-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+      <div class="relative z-10 max-w-4xl space-y-4">
+        <div class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-1 text-xs font-semibold text-emerald-300">
+          <span class="text-base">{item.icon}</span>
+          <span>EUDR Commodity Compliance &bull; {item.name}</span>
+        </div>
+
+        <!-- Targeted H1 Header -->
+        <h1 class="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-white leading-tight">
+          Free {item.titleName} TRACES NT Polygon Validator
+        </h1>
+
+        <!-- Targeted Subtitle addressing search intent -->
+        <p class="text-base sm:text-lg font-medium text-emerald-400/90">
+          Fix {item.titleName} EUDR GeoJSON Polygons for TRACES NT
+        </p>
+
+        <p class="text-slate-300 text-sm sm:text-base leading-relaxed max-w-3xl">
+          {item.description} Avoid rejection during Due Diligence Statement (DDS) submission in TRACES NT.
+          Our client-side spatial engine repairs unclosed polygon loops, resolves self-intersections via
+          zero-distance buffering, verifies WGS84 coordinates, and enforces mandatory polygon formatting
+          for {item.name.toLowerCase()} plots over 0.5 hectares.
+        </p>
+
+        <!-- Quick Spec Pills -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4">
+          <div class="p-3.5 rounded-xl border border-slate-800 bg-slate-950/70">
+            <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">EUDR Annex I HS Codes</span>
+            <p className="text-xs font-mono text-emerald-300 mt-1">{item.hsCodes}</p>
+          </div>
+          <div class="p-3.5 rounded-xl border border-slate-800 bg-slate-950/70">
+            <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">TRACES NT Plot Rule</span>
+            <p class="text-xs font-semibold text-slate-200 mt-1">Polygon required for &gt; 0.5 ha</p>
+          </div>
+          <div class="p-3.5 rounded-xl border border-slate-800 bg-slate-950/70">
+            <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">Processing Mode</span>
+            <p class="text-xs font-semibold text-slate-200 mt-1">100% In-Browser &bull; Zero Cloud Upload</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Interactive PreflightChecker Component Island -->
+    <section aria-labelledby="validator-tool-heading" class="space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 id="validator-tool-heading" class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+            <svg class="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            Interactive {item.titleName} GeoJSON Pre-Flight Checker
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">
+            Upload your {item.name.toLowerCase()} plot file or choose a preset below to inspect and auto-correct.
+          </p>
+        </div>
+      </div>
+
+      <PreflightChecker client:load />
+    </section>
+
+    <!-- Commodity-Specific EUDR Compliance Guide -->
+    <section class="rounded-2xl border border-slate-800 bg-slate-900/60 p-8 shadow-xl space-y-6">
+      <div class="border-b border-slate-800/80 pb-4">
+        <h2 class="text-xl font-bold text-white tracking-tight">
+          Why {item.titleName} GeoJSON Polygons Fail in TRACES NT
+        </h2>
+        <p class="text-xs text-slate-400 mt-1">
+          Regulatory requirements under Regulation (EU) 2023/1115 for {item.name.toLowerCase()} operators.
+        </p>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs text-slate-300 leading-relaxed">
+        <div class="p-5 rounded-xl border border-slate-800 bg-slate-950/60 space-y-2">
+          <h3 class="text-sm font-bold text-emerald-400 flex items-center gap-2">
+            <span>🛡️</span>
+            TRACES NT Polygon Mandatory Threshold (&gt; 0.5 ha)
+          </h3>
+          <p>
+            The European Commission's TRACES NT platform enforces that any plot of land used for {item.name.toLowerCase()}
+            production exceeding <strong>0.5 hectares</strong> must be supplied with a full polygonal perimeter, not a single point coordinate.
+            Submitting a point for a plot larger than 0.5 ha results in an immediate due diligence statement error.
+          </p>
+        </div>
+
+        <div class="p-5 rounded-xl border border-slate-800 bg-slate-950/60 space-y-2">
+          <h3 class="text-sm font-bold text-emerald-400 flex items-center gap-2">
+            <span>🔄</span>
+            Common Spatial Pitfalls in {item.titleName} Supply Chains
+          </h3>
+          <p>
+            {item.typicalIssues} Additionally, non-closed linear rings (omitted terminal point) and self-intersecting polygon boundaries
+            (figure-8 or bowtie geometries) trigger fatal topology errors when imported into the EU Information System.
+          </p>
+        </div>
+
+        <div class="p-5 rounded-xl border border-slate-800 bg-slate-950/60 space-y-2">
+          <h3 class="text-sm font-bold text-emerald-400 flex items-center gap-2">
+            <span>📐</span>
+            Zero-Distance Buffering Auto-Repair
+          </h3>
+          <p>
+            Our tool applies Turf.js spatial algorithms client-side. When self-intersections are detected via <code class="text-cyan-300">@turf/kinks</code>,
+            they are deterministically fixed using zero-distance buffering (<code class="text-cyan-300">turf.buffer(geom, 0)</code>), cleanly separating bowtie loops into
+            valid OGC-compliant simple polygons.
+          </p>
+        </div>
+
+        <div class="p-5 rounded-xl border border-slate-800 bg-slate-950/60 space-y-2">
+          <h3 class="text-sm font-bold text-emerald-400 flex items-center gap-2">
+            <span>🌐</span>
+            WGS84 EPSG:4326 Coordinate Standard
+          </h3>
+          <p>
+            All coordinates must be six decimal places in WGS84 coordinate reference system (EPSG:4326) with [Longitude, Latitude] ordering.
+            Our checker flags inverted latitudes and values exceeding [-180..180, -90..90] bounds before they reach European customs.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Cross-Linking Programmatic SEO Grid -->
+    <section class="rounded-2xl border border-slate-800 bg-slate-900/40 p-6 shadow-xl space-y-4">
+      <div class="flex items-center justify-between border-b border-slate-800/80 pb-3">
+        <h3 class="text-sm font-bold text-white tracking-tight uppercase">
+          All EUDR Regulated Commodities (TRACES NT Validators)
+        </h3>
+        <span class="text-xs text-slate-500">7 Annex I Commodity Groups</span>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
+        {allCommodities.map((comm) => (
+          <a
+            href={`/${comm.slug}-eudr-polygon-fix`}
+            class={`flex flex-col items-center justify-center p-3 rounded-xl border text-center transition group ${
+              comm.slug === item.slug
+                ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/30'
+                : 'border-slate-800 bg-slate-950/60 hover:border-slate-700 hover:bg-slate-900 text-slate-300'
+            }`}
+          >
+            <span class="text-xl mb-1 group-hover:scale-110 transition-transform">{comm.icon}</span>
+            <span class="text-xs font-semibold">{comm.name}</span>
+            <span class="text-[10px] text-slate-500 mt-0.5">EUDR Fixer</span>
+          </a>
+        ))}
+      </div>
+    </section>
+  </div>
+</Layout>

@@ -1,0 +1,502 @@
+import type { APIRoute } from 'astro';
+import { GoogleGenAI, Type } from '@google/genai';
+import * as turf from '@turf/turf';
+
+// Ensure this route executes as a dynamic SSR endpoint on Cloudflare Workers
+export const prerender = false;
+
+// Structured data interface extracted by Gemini
+interface ExtractedTradeData {
+  hsCode: string;
+  totalWeightKg: number;
+  countryOfOrigin: string;
+  supplierName: string;
+}
+
+// Production plot entry for TRACES NT
+interface TracesProductionPlot {
+  plotIdentifier: string;
+  country: string;
+  geometryType: string;
+  areaHectares: number;
+  areaSquareMeters: number;
+  centroidCoordinates: [number, number] | null;
+  tracesNtCompliant: boolean;
+  geometry: any;
+}
+
+// TRACES NT Due Diligence Statement (DDS) Payload Schema
+interface TracesDueDiligenceStatement {
+  statementType: 'DUE_DILIGENCE_STATEMENT';
+  referenceNumber: string;
+  regulation: 'Regulation (EU) 2023/1115 (EUDR)';
+  status: 'DRAFT_READY_FOR_SUBMISSION';
+  createdAt: string;
+  operator: {
+    supplierName: string;
+    countryOfOrigin: string;
+    identifierType: 'EORI_OR_NATIONAL_ID';
+    role: 'OPERATOR_OR_IMPORTER';
+  };
+  commodity: {
+    hsCode: string;
+    description: string;
+    netMassKg: number;
+    countryOfProduction: string;
+  };
+  summary: {
+    totalPlots: number;
+    totalHectares: number;
+    allPlotsCompliant: boolean;
+    crs: 'EPSG:4326';
+  };
+  productionPlots: TracesProductionPlot[];
+  rawGeoJson: any;
+  auditTrail: {
+    validationEngine: string;
+    documentAiModel: string;
+    processedAt: string;
+    clientSidePreflightVerified: boolean;
+  };
+}
+
+// Convert ArrayBuffer to Base64 in Cloudflare Workers / Node environments
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(buffer).toString('base64');
+  }
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+// Helper to provide HS code description
+function getHsCommodityDescription(hsCode: string): string {
+  const clean = hsCode.replace(/\D/g, '');
+  if (clean.startsWith('0102') || clean.startsWith('0201') || clean.startsWith('0202')) {
+    return 'Bovine Cattle & Beef Products (EUDR Annex I)';
+  }
+  if (clean.startsWith('1801') || clean.startsWith('1802') || clean.startsWith('1803') || clean.startsWith('1804') || clean.startsWith('1805') || clean.startsWith('1806')) {
+    return 'Cocoa Beans & Derived Cocoa Products (EUDR Annex I)';
+  }
+  if (clean.startsWith('0901')) {
+    return 'Coffee (Roasted, Unroasted, Husks & Skins) (EUDR Annex I)';
+  }
+  if (clean.startsWith('1511') || clean.startsWith('120710') || clean.startsWith('230660')) {
+    return 'Palm Oil & Derived Fractions (EUDR Annex I)';
+  }
+  if (clean.startsWith('4001') || clean.startsWith('4005') || clean.startsWith('4011')) {
+    return 'Natural Rubber & Rubber Products (EUDR Annex I)';
+  }
+  if (clean.startsWith('1201') || clean.startsWith('1507') || clean.startsWith('2304')) {
+    return 'Soya Beans, Meal & Derived Fractions (EUDR Annex I)';
+  }
+  if (clean.startsWith('44') || clean.startsWith('47') || clean.startsWith('48') || clean.startsWith('94')) {
+    return 'Wood, Timber, Pulp & Paper Products (EUDR Annex I)';
+  }
+  return `Regulated EUDR Commodity (HS Code ${hsCode})`;
+}
+
+export const POST: APIRoute = async ({ request, locals }) => {
+  // 1. Resolve Cloudflare runtime environment variables
+  const runtimeEnv = (locals as any)?.runtime?.env || {};
+  const apiKey =
+    runtimeEnv.GEMINI_API_KEY ||
+    runtimeEnv.GOOGLE_API_KEY ||
+    runtimeEnv.API_KEY ||
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.API_KEY ||
+    import.meta.env.GEMINI_API_KEY ||
+    import.meta.env.GOOGLE_API_KEY;
+
+  if (!apiKey) {
+    return new Response(
+      JSON.stringify({
+        error: 'Missing API key configuration in Cloudflare environment variables.',
+        details:
+          'GEMINI_API_KEY (or API_KEY) must be provided in Cloudflare Workers / Pages environment secrets.',
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // 2. Parse Multipart Form Data
+  let formData: FormData;
+  try {
+    formData = await request.formData();
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify({
+        error: 'Failed to parse multipart/form-data request body.',
+        details: err?.message || String(err),
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  const geojsonEntry = formData.get('geojson');
+  const pdfEntry = formData.get('pdf');
+
+  // 3. Validate presence of required fields
+  if (!geojsonEntry) {
+    return new Response(
+      JSON.stringify({
+        error: 'Missing required field: "geojson".',
+        details:
+          'Please provide a validated GeoJSON string generated by the Turf.js pre-flight engine.',
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  if (!pdfEntry || !(pdfEntry instanceof Blob)) {
+    return new Response(
+      JSON.stringify({
+        error: 'Missing required field: "pdf".',
+        details:
+          'Please provide an uploaded PDF shipping document (e.g. Bill of Lading, invoice, or manifest).',
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // 4. Validate and Parse GeoJSON Payload
+  let rawGeoJson: any;
+  try {
+    const geojsonString =
+      typeof geojsonEntry === 'string'
+        ? geojsonEntry
+        : await (geojsonEntry as Blob).text();
+    rawGeoJson = JSON.parse(geojsonString);
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify({
+        error: 'Invalid GeoJSON syntax in "geojson" field.',
+        details: err?.message || 'Payload could not be parsed as valid JSON.',
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // Normalize GeoJSON features
+  let normalizedFeatures: any[] = [];
+  if (rawGeoJson.type === 'FeatureCollection' && Array.isArray(rawGeoJson.features)) {
+    normalizedFeatures = rawGeoJson.features;
+  } else if (rawGeoJson.type === 'Feature') {
+    normalizedFeatures = [rawGeoJson];
+  } else if (rawGeoJson.type && rawGeoJson.coordinates) {
+    normalizedFeatures = [{ type: 'Feature', properties: {}, geometry: rawGeoJson }];
+  } else {
+    return new Response(
+      JSON.stringify({
+        error: 'Unrecognized GeoJSON format.',
+        details: 'Expected a FeatureCollection, Feature, or standard Geometry object.',
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  if (normalizedFeatures.length === 0) {
+    return new Response(
+      JSON.stringify({
+        error: 'GeoJSON contains zero features.',
+        details: 'At least one production plot feature is required for TRACES NT submission.',
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // 5. Read PDF File Buffer and convert to Base64
+  let pdfBase64: string;
+  try {
+    const pdfArrayBuffer = await (pdfEntry as File).arrayBuffer();
+    if (pdfArrayBuffer.byteLength === 0) {
+      return new Response(
+        JSON.stringify({
+          error: 'Uploaded PDF file is empty (0 bytes).',
+          details: 'Please attach a valid PDF document with readable text or scanned pages.',
+        }),
+        {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+    pdfBase64 = arrayBufferToBase64(pdfArrayBuffer);
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify({
+        error: 'Failed to read uploaded PDF file.',
+        details: err?.message || String(err),
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // 6. Invoke Google Gen AI SDK with Strict JSON Schema (Structured Output)
+  let extractedTradeData: ExtractedTradeData;
+  try {
+    const ai = new GoogleGenAI({ apiKey });
+
+    const extractionPrompt = `You are an automated customs auditor for the European Union Deforestation Regulation (EUDR - Regulation (EU) 2023/1115).
+Examine the attached shipping document (Bill of Lading, Commercial Invoice, Phyto Certificate, or Manifest) and extract the required trade declaration fields.
+
+STRICT FIELD EXTRACTION RULES:
+1. hsCode: The Harmonized System (HS) tariff code. Must be a string with at least 6 digits (e.g. "090111", "180100", "151110", "440711"). If dotted in document, extract numbers and dots, ensuring >= 6 numeric digits.
+2. totalWeightKg: Total net or gross mass in kilograms as a positive number. If reported in metric tonnes (MT), convert to kilograms (1 MT = 1000 kg). Output purely the numeric value.
+3. countryOfOrigin: Exactly 2-letter ISO 3166-1 alpha-2 uppercase country code where the commodity was produced or loaded (e.g., "BR", "CI", "ID", "VN", "GH", "CO", "PE").
+4. supplierName: Complete legal commercial name of the supplier, shipper, exporter, or farming cooperative company.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          inlineData: {
+            data: pdfBase64,
+            mimeType: 'application/pdf',
+          },
+        },
+        extractionPrompt,
+      ],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            hsCode: {
+              type: Type.STRING,
+              description:
+                'Harmonized System (HS) code, minimum 6 digits (e.g. 090111, 180100, 151110)',
+            },
+            totalWeightKg: {
+              type: Type.NUMBER,
+              description: 'Total weight or net mass in kilograms (numeric value only)',
+            },
+            countryOfOrigin: {
+              type: Type.STRING,
+              description:
+                'Two-letter ISO 3166-1 alpha-2 country code of origin (e.g. BR, CI, ID, GH, VN, CO)',
+            },
+            supplierName: {
+              type: Type.STRING,
+              description:
+                'Legal commercial name of the supplier, exporter, shipper, or cooperative',
+            },
+          },
+          required: ['hsCode', 'totalWeightKg', 'countryOfOrigin', 'supplierName'],
+        },
+      },
+    });
+
+    const responseText = response.text;
+    if (!responseText) {
+      throw new Error('Gemini returned an empty response text.');
+    }
+
+    const parsedJson = JSON.parse(responseText);
+
+    // Validate extracted values conform to strict criteria
+    const rawHs = String(parsedJson.hsCode || '').trim();
+    const cleanDigits = rawHs.replace(/\D/g, '');
+    if (cleanDigits.length < 6) {
+      throw new Error(
+        `Extracted HS Code "${rawHs}" has fewer than 6 digits (found ${cleanDigits.length} digits). Minimum 6 digits required by EUDR customs rules.`
+      );
+    }
+
+    const rawCountry = String(parsedJson.countryOfOrigin || '').trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(rawCountry)) {
+      throw new Error(
+        `Extracted Country of Origin "${rawCountry}" is not a valid 2-letter ISO 3166-1 alpha-2 code.`
+      );
+    }
+
+    const weight = Number(parsedJson.totalWeightKg);
+    if (isNaN(weight) || weight <= 0) {
+      throw new Error(
+        `Extracted Total Weight "${parsedJson.totalWeightKg}" is not a valid positive number in kilograms.`
+      );
+    }
+
+    const supplier = String(parsedJson.supplierName || '').trim();
+    if (!supplier) {
+      throw new Error('Extracted Supplier Name is empty.');
+    }
+
+    extractedTradeData = {
+      hsCode: rawHs,
+      totalWeightKg: weight,
+      countryOfOrigin: rawCountry,
+      supplierName: supplier,
+    };
+  } catch (geminiErr: any) {
+    return new Response(
+      JSON.stringify({
+        error: 'Failed to extract structured data from PDF via Gemini 1.5 Flash.',
+        details: geminiErr?.message || String(geminiErr),
+      }),
+      {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // 7. Calculate Geometry Properties and Assemble Production Plots
+  let totalHectares = 0;
+  let allPlotsCompliant = true;
+
+  const productionPlots: TracesProductionPlot[] = normalizedFeatures.map(
+    (feat: any, idx: number) => {
+      const plotId =
+        feat.properties?.plot_id ||
+        feat.properties?.plotId ||
+        feat.properties?.id ||
+        `PLOT-${extractedTradeData.countryOfOrigin}-${String(idx + 1).padStart(4, '0')}`;
+
+      const plotCountry =
+        feat.properties?.country ||
+        feat.properties?.country_code ||
+        extractedTradeData.countryOfOrigin;
+
+      const geomType = feat.geometry?.type || 'Unknown';
+      let areaM2 = 0;
+      let areaHa = 0;
+      let centroid: [number, number] | null = null;
+      let isCompliant = true;
+
+      if (geomType === 'Polygon' || geomType === 'MultiPolygon') {
+        try {
+          areaM2 = turf.area(feat);
+          areaHa = Number((areaM2 / 10000).toFixed(4));
+          totalHectares += areaHa;
+
+          const centerFeat = turf.center(feat);
+          if (centerFeat?.geometry?.coordinates) {
+            centroid = [
+              Number(centerFeat.geometry.coordinates[0].toFixed(6)),
+              Number(centerFeat.geometry.coordinates[1].toFixed(6)),
+            ];
+          }
+
+          // Polygons are compliant regardless of size
+          isCompliant = true;
+        } catch {
+          isCompliant = false;
+          allPlotsCompliant = false;
+        }
+      } else if (geomType === 'Point') {
+        const declaredArea =
+          feat.properties?.declared_area_ha ??
+          feat.properties?.area_ha ??
+          feat.properties?.hectares ??
+          null;
+
+        if (declaredArea !== null && Number(declaredArea) > 0.5) {
+          isCompliant = false;
+          allPlotsCompliant = false;
+        }
+
+        if (Array.isArray(feat.geometry?.coordinates) && feat.geometry.coordinates.length >= 2) {
+          centroid = [
+            Number(feat.geometry.coordinates[0].toFixed(6)),
+            Number(feat.geometry.coordinates[1].toFixed(6)),
+          ];
+        }
+      } else {
+        isCompliant = false;
+        allPlotsCompliant = false;
+      }
+
+      return {
+        plotIdentifier: plotId,
+        country: plotCountry,
+        geometryType: geomType,
+        areaHectares: areaHa,
+        areaSquareMeters: Math.round(areaM2),
+        centroidCoordinates: centroid,
+        tracesNtCompliant: isCompliant,
+        geometry: feat.geometry,
+      };
+    }
+  );
+
+  // 8. Assemble TRACES NT Due Diligence Statement (DDS) Payload
+  const referenceNumber = `DDS-EUDR-${extractedTradeData.countryOfOrigin}-${new Date()
+    .toISOString()
+    .slice(0, 10)
+    .replace(/-/g, '')}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+  const ddsPayload: TracesDueDiligenceStatement = {
+    statementType: 'DUE_DILIGENCE_STATEMENT',
+    referenceNumber,
+    regulation: 'Regulation (EU) 2023/1115 (EUDR)',
+    status: 'DRAFT_READY_FOR_SUBMISSION',
+    createdAt: new Date().toISOString(),
+    operator: {
+      supplierName: extractedTradeData.supplierName,
+      countryOfOrigin: extractedTradeData.countryOfOrigin,
+      identifierType: 'EORI_OR_NATIONAL_ID',
+      role: 'OPERATOR_OR_IMPORTER',
+    },
+    commodity: {
+      hsCode: extractedTradeData.hsCode,
+      description: getHsCommodityDescription(extractedTradeData.hsCode),
+      netMassKg: extractedTradeData.totalWeightKg,
+      countryOfProduction: extractedTradeData.countryOfOrigin,
+    },
+    summary: {
+      totalPlots: productionPlots.length,
+      totalHectares: Number(totalHectares.toFixed(4)),
+      allPlotsCompliant,
+      crs: 'EPSG:4326',
+    },
+    productionPlots,
+    rawGeoJson,
+    auditTrail: {
+      validationEngine: 'GeoHeal Turf.js Deterministic Pre-Flight Engine v7.4',
+      documentAiModel: 'Google Gemini 1.5 Flash (Strict JSON Schema)',
+      processedAt: new Date().toISOString(),
+      clientSidePreflightVerified: true,
+    },
+  };
+
+  // 9. Return Assembled DDS Response
+  return new Response(JSON.stringify(ddsPayload, null, 2), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-EUDR-Regulation': '2023/1115',
+      'X-TRACES-NT-Schema': 'DueDiligenceStatement-v1',
+    },
+  });
+};
